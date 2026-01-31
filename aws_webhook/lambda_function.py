@@ -15,8 +15,12 @@ import base64
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# dev mode
+SKIP_QINGPING_SIG_VERIFY = os.environ.get("SKIP_QINGPING_SIG_VERIFY", "false").lower() == "true"
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+
 # Qingping
-APP_SECRET = os.environ.get("APP_SECRET", "").strip()
+APP_SECRET = os.environ.get("QINGPING_APP_SECRET", "").strip()
 
 # Tuya
 ACCESS_ID = os.environ.get("TUYA_ACCESS_ID", "").strip()
@@ -44,9 +48,12 @@ def _verify_signature(signature_block: dict) -> bool:
 dynamodb = boto3.resource("dynamodb")
 TABLE_SENSOR_READINGS = os.environ.get("TABLE_SENSOR_READINGS", "SensorReadings")
 TABLE_SENSOR_PLUG_MAPPING = os.environ.get("TABLE_SENSOR_PLUG_MAPPING", "SensorPlugMapping")
+TABLE_QINGPING_DEVICES = os.environ.get("TABLE_QINGPING_DEVICES", "QingpingDevices")
+SHARED_USER_ID = os.environ.get("SHARED_USER_ID", "qingping_shared")
 
 readings_table = dynamodb.Table(TABLE_SENSOR_READINGS)
 mapping_table = dynamodb.Table(TABLE_SENSOR_PLUG_MAPPING)
+devices_table = dynamodb.Table(TABLE_QINGPING_DEVICES)
 
 def _get_event_body_str(event: dict) -> str:
     body = event.get("body") or ""
@@ -76,6 +83,37 @@ def save_sensor_reading(sensor_mac: str, reading: dict):
         readings_table.put_item(Item=item)
     except Exception as e:
         logger.error(f"DynamoDB put_item failed for {sensor_mac} ts={ts_sec}: {e}")
+
+def upsert_qingping_device(info: dict, user_id: str = "qingping_shared"):
+    """
+    Registers/updates a sensor in QingpingDevices so GET /qingping/devices can list it.
+    """
+    sensor_mac = info.get("mac")
+    if not sensor_mac:
+        return
+
+    product = info.get("product", {}) or {}
+    now = int(time.time())
+
+    item = {
+        "sensor_mac": sensor_mac,          # (should be PK of QingpingDevices)
+        "user_id": user_id,                # used by your GSI gsi_user_id
+        "device_name": info.get("name", ""),   # Qingping's name field
+        "product": {
+            "id": product.get("id"),
+            "code": product.get("code"),
+            "name": product.get("name"),
+            "en_name": product.get("en_name"),
+        },
+        "version": info.get("version", ""),
+        "connection_type": info.get("connection_type", ""),
+        "enabled": True,
+        "last_seen_at": now,
+        "bound_at": now,  # optional; or only set on first insert (see note below)
+    }
+
+    # If you want "bound_at" only on first insert, use UpdateExpression instead.
+    devices_table.put_item(Item=item)
 
 # lookup plug for a sensor
 def get_plug_device_id_for_sensor(sensor_mac: str) -> Optional[str]:
@@ -113,14 +151,17 @@ def handle_qingping_webhook(event):
 
     logger.info("Incoming Qingping Data: %s", json.dumps(payload, ensure_ascii=False))
 
-    sig_block = payload.get("signature", {})
-    if not _verify_signature(sig_block):
-        return {"statusCode": 401, "body": json.dumps({"status": "unauthorized"})}
-
+    if not SKIP_QINGPING_SIG_VERIFY:
+        sig_block = payload.get("signature", {})
+        if not _verify_signature(sig_block):
+            return {"statusCode": 401, "body": json.dumps({"status": "unauthorized"})}
+    else:
+        logger.info("Skipping Qingping signature verification (dev mode)")
+    
     info = payload.get("payload", {}).get("info", {})
     sensor_mac = info.get("mac")
     data_list = payload.get("payload", {}).get("data", [])
-
+    upsert_qingping_device(info, user_id=SHARED_USER_ID)
     if not sensor_mac or not data_list:
         return {"statusCode": 200, "body": json.dumps({"status": "ok", "message": "no data"})}
 
@@ -137,10 +178,14 @@ def handle_qingping_webhook(event):
     if plug_device_id:
         state = pm25 >= 9
         logger.info(f"Mapped plug found: {plug_device_id}. Setting switch={state}")
-        try:
-            control_plug(plug_device_id, state)
-        except Exception as e:
-            logger.error(f"Tuya control failed for {plug_device_id}: {e}")
+
+        if DRY_RUN:
+            logger.info("DRY_RUN enabled → skipping Tuya control call")
+        else:
+            try:
+                control_plug(plug_device_id, state)
+            except Exception as e:
+                logger.error(f"Tuya control failed for {plug_device_id}: {e}")
     else:
         logger.info(f"No plug mapping found for sensor {sensor_mac} (skipping control)")
 
