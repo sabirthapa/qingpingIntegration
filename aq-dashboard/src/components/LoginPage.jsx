@@ -114,6 +114,24 @@ export default function LoginPage({ onLoginSuccess }) {
               )}
             </button>
           </form>
+
+          {/* partnership logos */}
+          <div className="px-8 pt-5 pb-6 border-t border-gray-100">
+            <p className="text-xs text-gray-400 font-medium text-center mb-3">Powered by</p>
+            <div className="flex items-center justify-center gap-6">
+              <img 
+                src="/images/auspexMedix.png" 
+                alt="Auspex Medix" 
+                className="h-5 object-contain opacity-100 hover:opacity-100 transition-all"
+              />
+              <div className="h-6 w-px bg-gray-300"></div>
+              <img 
+                src="/images/ub.jpg" 
+                alt="University at Buffalo" 
+                className="h-5 object-contain opacity-100 hover:opacity-100 transition-all"
+              />
+            </div>
+          </div>
         </div>
 
         {/* footer note */}

@@ -9,7 +9,6 @@ import { API_BASE_URL }             from '../api/fetchInterceptor.js'
 import SensorCard                   from './SensorCard.jsx'
 import MappingCard                  from './MappingCard.jsx'
 
-// ─── tiny shared Alert ────────────────────────────────────────
 function Alert({ type = 'info', children }) {
   const styles = {
     error:   'bg-red-50 border-red-200 text-red-800',
@@ -35,7 +34,7 @@ function LoadingSpinner() {
   )
 }
 
-// ─── Dashboard ────────────────────────────────────────────────
+// Dashboard 
 export default function AirQualityDashboard({ onLogout }) {
   const [currentView,    setCurrentView]    = useState('devices')
   const userId                             = 'qingping_shared'
@@ -79,7 +78,7 @@ export default function AirQualityDashboard({ onLogout }) {
     finally   { setTuyaLoading(false) }
   }
 
-  // ── mapping handlers ──────────────────────────────────────
+  // mapping handlers
   const handleCreateMapping = async (e) => {
     e.preventDefault()
     setLoading(true); setError(null); setSuccess(null)
@@ -110,7 +109,7 @@ export default function AirQualityDashboard({ onLogout }) {
     } catch (e) { setError(`Failed to delete mapping: ${e.message}`) }
   }
 
-  // ── modal openers ─────────────────────────────────────────
+  //  modal openers
   const openMapForm = (dev) => {
     setMapForm({ sensorMac: dev.sensor_mac, tuyaDeviceId: '', enabled: true })
     setShowMapForm(true)
@@ -130,7 +129,7 @@ export default function AirQualityDashboard({ onLogout }) {
     setError(null); setSuccess(null)
   }
 
-  // ── CSV download ──────────────────────────────────────────
+  // CSV download
   const handleDownloadCSV = async (e) => {
     e.preventDefault()
     if (!csvForm.startDate || !csvForm.endDate) { setError('Please select both start and end dates'); return }
@@ -183,11 +182,11 @@ export default function AirQualityDashboard({ onLogout }) {
 
   const hasMappingForDevice = (mac) => mappings.some((m) => m.sensor_mac === mac)
 
-  // ─── render ───────────────────────────────────────────────
+  //  render
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
 
-      {/* ════════════════ HEADER ════════════════ */}
+      {/* HEADER */}
       <header className="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex items-center justify-between">
@@ -223,7 +222,7 @@ export default function AirQualityDashboard({ onLogout }) {
         </div>
       </header>
 
-      {/* ════════════════ NAV ════════════════ */}
+      {/* NAV */}
       <nav className="bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex gap-1">
@@ -248,12 +247,12 @@ export default function AirQualityDashboard({ onLogout }) {
         </div>
       </nav>
 
-      {/* ════════════════ MAIN ════════════════ */}
+      {/*  MAIN  */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {error   && <Alert type="error"  >{error}  </Alert>}
         {success && <Alert type="success">{success}</Alert>}
 
-        {/* ── Devices view ── */}
+        {/*  Devices view  */}
         {currentView === 'devices' && (
           <div className="space-y-6">
             <div className="flex items-center justify-between">
@@ -292,7 +291,7 @@ export default function AirQualityDashboard({ onLogout }) {
           </div>
         )}
 
-        {/* ── Mappings view ── */}
+        {/*  Mappings view  */}
         {currentView === 'mappings' && (
           <div className="space-y-6">
             <div className="flex items-center justify-between">
@@ -338,7 +337,7 @@ export default function AirQualityDashboard({ onLogout }) {
           </div>
         )}
 
-        {/* ════════════════ MAP-TO-PLUG MODAL ════════════════ */}
+        {/*  MAP-TO-PLUG MODAL  */}
         {showMapForm && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
             <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
@@ -500,7 +499,7 @@ export default function AirQualityDashboard({ onLogout }) {
         )}
       </main>
 
-      {/* ════════════════ FOOTER ════════════════ */}
+      {/* FOOTER */}
       <footer className="bg-white border-t border-gray-200 mt-16">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex items-center justify-between text-sm text-gray-600">
