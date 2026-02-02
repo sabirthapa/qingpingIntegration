@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Air Quality Automation Dashboard</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+        body { font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="text/babel">
+        const { useState, useEffect, useCallback } = React;
+
+        // ─────────────────────────────────────────────
+        // Cognito Configuration
+        // ─────────────────────────────────────────────
+        const COGNITO_REGION    = 'us-west-1';
+        const COGNITO_CLIENT_ID = '34sjhnv2pj2j8rofp39mpa4gi6';
+        const COGNITO_ENDPOINT  = `https://cognito-idp.${COGNITO_REGION}.amazonaws.com`;
+
+        // ─────────────────────────────────────────────
+        // API Base URL
+        // ─────────────────────────────────────────────
+        const API_BASE_URL = 'https://ou1jc1tszb.execute-api.us-west-1.amazonaws.com/dev';
+
+        // ─────────────────────────────────────────────
+        // Auth helpers
+        // ─────────────────────────────────────────────
+        const TOKEN_KEY = 'aq_access_token';
+
+        // Module-level callback; App sets this so the interceptor can trigger logout on 401
+        let _onUnauthorized = null;
+
+        async function cognitoLogin(email, password) {
+            const res = await _originalFetch(COGNITO_ENDPOINT + '/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-amz-json-1.1',
+                    'X-Amz-Target': 'AWSCognitoIdentityProviderService.InitiateAuth'
+                },
+                body: JSON.stringify({
+                    AuthFlow: 'USER_PASSWORD_AUTH',
+                    ClientId: COGNITO_CLIENT_ID,
+                    AuthParameters: { USERNAME: email, PASSWORD: password }
+                })
+            });
+
+            if (!res.ok) {
+                const err = await res.json();
+                // Map Cognito error codes to user-friendly messages
+                const code = err.__type || '';
+                if (code.includes('NotAuthorizedException'))   throw new Error('Incorrect email or password.');
+                if (code.includes('UserNotFoundException'))    throw new Error('No account found with that email.');
+                if (code.includes('UserNotConfirmedException')) throw new Error('Account not confirmed. Please check your email.');
+                throw new Error(err.message || 'Authentication failed.');
+            }
+
+            const data = await res.json();
+            return data.AuthenticationResult; // { AccessToken, IdToken, ... }
+        }
+
+        function getToken()    { return sessionStorage.getItem(TOKEN_KEY); }
+        function setToken(t)   { sessionStorage.setItem(TOKEN_KEY, t); }
+        function clearToken()  { sessionStorage.removeItem(TOKEN_KEY); }
+
+        // ─────────────────────────────────────────────
+        // Fetch interceptor  —  attaches Bearer token to
+        // every request aimed at API_BASE_URL, and fires
+        // the logout callback on 401.
+        // ─────────────────────────────────────────────
+        const _originalFetch = window.fetch.bind(window);
+
+        window.fetch = async function(input, options = {}) {
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const isOurAPI = url.startsWith(API_BASE_URL);
+
+            if (isOurAPI) {
+                const token = getToken();
+                if (token) {
+                    options.headers = { ...(options.headers || {}), 'Authorization': `Bearer ${token}` };
+                }
+            }
+
+            const response = await _originalFetch(input, options);
+
+            if (isOurAPI && response.status === 401) {
+                clearToken();
+                if (_onUnauthorized) _onUnauthorized();
+            }
+
+            return response;
+        };
+
+        // ─────────────────────────────────────────────
+        // Utility functions
+        // ─────────────────────────────────────────────
+        const formatTimestamp = (ts) => ts ? new Date(ts * 1000).toLocaleString() : 'N/A';
+
+        const formatDateForAPI = (date) => {
+            const d = new Date(date);
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+        };
+
+        const getDefaultDateRange = () => {
+            const end = new Date(), start = new Date();
+            start.setDate(start.getDate() - 7);
+            return { start: formatDateForAPI(start), end: formatDateForAPI(end) };
+        };
+
+        const getAirQualityStatus = (pm25) => {
+            if (pm25 == null)  return { label:'Unknown',   color:'bg-gray-500',   textColor:'text-gray-700' };
+            if (pm25 < 9)      return { label:'Good',      color:'bg-emerald-500', textColor:'text-emerald-700' };
+            if (pm25 < 35)     return { label:'Moderate',  color:'bg-yellow-500', textColor:'text-yellow-700' };
+            if (pm25 < 55)     return { label:'Unhealthy', color:'bg-orange-500', textColor:'text-orange-700' };
+            return { label:'Hazardous', color:'bg-red-500', textColor:'text-red-700' };
+        };
+
+        // ─────────────────────────────────────────────
+        // API Service  (no auth logic here — interceptor handles it)
+        // ─────────────────────────────────────────────
+        const api = {
+            async listTuyaDevices() {
+                const r = await fetch(`${API_BASE_URL}/tuya/devices`);
+                if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+                return r.json();
+            },
+            async listDevices(userId) {
+                const r = await fetch(`${API_BASE_URL}/qingping/devices?user_id=${userId}`);
+                if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+                return r.json();
+            },
+            async listMappings(userId) {
+                const r = await fetch(`${API_BASE_URL}/mapping/sensor-plug?user_id=${encodeURIComponent(userId)}`);
+                if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+                return r.json();
+            },
+            async createMapping(userId, sensorMac, tuyaDeviceId, enabled = true) {
+                const r = await fetch(`${API_BASE_URL}/mapping/sensor-plug`, {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ user_id:userId, sensor_mac:sensorMac, tuya_device_id:tuyaDeviceId, enabled })
+                });
+                if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+                return r.json();
+            },
+            async deleteMapping(sensorMac) {
+                const r = await fetch(`${API_BASE_URL}/mapping/sensor-plug`, {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({ sensor_mac:sensorMac, delete:true })
+                });
+                if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+                return r.json();
+            },
+            async toggleMapping(userId, sensorMac, tuyaDeviceId, enabled) {
+                return this.createMapping(userId, sensorMac, tuyaDeviceId, enabled);
+            }
+        };
+
+        // ─────────────────────────────────────────────
+        // Shared UI components
+        // ─────────────────────────────────────────────
+        const Icon = ({ name, className = 'w-5 h-5' }) => {
+            const ref = React.useRef();
+            useEffect(() => {
+                if (ref.current) lucide.createIcons({ icons:{ [name]: lucide[name] }, nameAttr:'data-lucide', attrs:{ class: className } });
+            }, [name, className]);
+            return <i ref={ref} data-lucide={name} className={className}></i>;
+        };
+
+        const Alert = ({ type = 'info', children }) => {
+            const styles = {
+                error:'bg-red-50 border-red-200 text-red-800',
+                success:'bg-emerald-50 border-emerald-200 text-emerald-800',
+                info:'bg-blue-50 border-blue-200 text-blue-800',
+                warning:'bg-yellow-50 border-yellow-200 text-yellow-800'
+            };
+            useEffect(() => { lucide.createIcons(); }, []);
+            return (
+                <div className={`px-4 py-3 rounded-lg border ${styles[type]} mb-4 flex items-start gap-2 animate-fadeIn`}>
+                    {type === 'error'   && <Icon name="alert-circle"  className="w-5 h-5 mt-0.5 flex-shrink-0" />}
+                    {type === 'success' && <Icon name="check-circle"  className="w-5 h-5 mt-0.5 flex-shrink-0" />}
+                    <div className="flex-1">{children}</div>
+                </div>
+            );
+        };
+
+        const LoadingSpinner = () => (
+            <div className="flex items-center justify-center py-8">
+                <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+            </div>
+        );
+
+        // ─────────────────────────────────────────────
+        // Login Page
+        // ─────────────────────────────────────────────
+        function LoginPage({ onLoginSuccess }) {
+            const [email, setEmail]       = useState('');
+            const [password, setPassword] = useState('');
+            const [error, setError]       = useState(null);
+            const [loading, setLoading]   = useState(false);
+
+            useEffect(() => { lucide.createIcons(); }, [error, loading]);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setLoading(true);
+                setError(null);
+                try {
+                    const result = await cognitoLogin(email, password);
+                    setToken(result.AccessToken);
+                    // Reload the page.  Token is already in sessionStorage so App
+                    // will read it on mount and render Dashboard immediately.
+                    // This is necessary because cdn.tailwindcss.com generates its
+                    // stylesheet from the classes it sees at page-load time.  If we
+                    // just swap LoginPage → Dashboard via React state, the Dashboard-
+                    // only classes (bg-clip-text, max-w-7xl, grid-cols-3, …) were
+                    // never included in the stylesheet, so the Dashboard renders
+                    // invisible.  A reload lets Tailwind scan the real DOM from scratch.
+                    window.location.reload();
+                } catch (err) {
+                    setError(err.message);
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50 flex items-center justify-center p-4">
+                    <div className="w-full max-w-md">
+                        {/* Card */}
+                        <div className="bg-white rounded-2xl shadow-xl border border-gray-200 overflow-hidden animate-fadeIn">
+
+                            {/* Gradient header — same palette as dashboard cards */}
+                            <div className="bg-gradient-to-br from-blue-600 to-cyan-600 px-8 py-10 text-center">
+                                <div className="w-16 h-16 bg-white bg-opacity-20 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                    <Icon name="wind" className="w-9 h-9 text-white" />
+                                </div>
+                                <h1 className="text-2xl font-bold text-white">Air Quality Automation</h1>
+                                <p className="text-blue-100 text-sm mt-1">Sign in to access your dashboard</p>
+                            </div>
+
+                            {/* Form */}
+                            <form onSubmit={handleSubmit} className="p-8 space-y-5">
+                                {error && <Alert type="error">{error}</Alert>}
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Email</label>
+                                    <div className="relative">
+                                        <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
+                                            <Icon name="mail" className="w-5 h-5 text-gray-400" />
+                                        </div>
+                                        <input
+                                            type="email"
+                                            required
+                                            autoComplete="email"
+                                            value={email}
+                                            onChange={(e) => setEmail(e.target.value)}
+                                            placeholder="you@example.com"
+                                            className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-2">Password</label>
+                                    <div className="relative">
+                                        <div className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none">
+                                            <Icon name="lock" className="w-5 h-5 text-gray-400" />
+                                        </div>
+                                        <input
+                                            type="password"
+                                            required
+                                            autoComplete="current-password"
+                                            value={password}
+                                            onChange={(e) => setPassword(e.target.value)}
+                                            placeholder="••••••••"
+                                            className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+                                        />
+                                    </div>
+                                </div>
+
+                                <button
+                                    type="submit"
+                                    disabled={loading}
+                                    className="w-full py-3 px-6 bg-gradient-to-r from-blue-600 to-cyan-600 text-white font-semibold rounded-lg hover:from-blue-700 hover:to-cyan-700 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-md hover:shadow-lg flex items-center justify-center gap-2"
+                                >
+                                    {loading ? (
+                                        <>
+                                            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                            Signing in…
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Icon name="log-in" className="w-5 h-5" />
+                                            Sign In
+                                        </>
+                                    )}
+                                </button>
+                            </form>
+                        </div>
+
+                        {/* Footer note */}
+                        <p className="text-center text-xs text-gray-500 mt-6">
+                            Secured with Amazon Cognito · Session expires on page reload
+                        </p>
+                    </div>
+                </div>
+            );
+        }
+
+        // ─────────────────────────────────────────────
+        // Dashboard sub-components
+        // ─────────────────────────────────────────────
+        const SensorCard = ({ device, onMapToPug, onDownloadCSV, hasMappingExisting }) => {
+            const aqStatus = device.latest_pm25 ? getAirQualityStatus(device.latest_pm25) : null;
+            useEffect(() => { lucide.createIcons(); }, []);
+            return (
+                <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-200 hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
+                    <div className="bg-gradient-to-br from-blue-500 to-cyan-500 px-6 py-4 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <Icon name="activity" className="w-6 h-6 text-white" />
+                            <div>
+                                <h3 className="text-white font-semibold text-lg">{device.device_name || device.product?.en_name || 'Air Monitor'}</h3>
+                                <p className="text-blue-100 text-sm font-mono">{device.sensor_mac}</p>
+                            </div>
+                        </div>
+                        <div className={`px-3 py-1 rounded-full text-xs font-medium ${device.enabled ? 'bg-green-400 text-green-900' : 'bg-gray-400 text-gray-900'}`}>{device.enabled ? 'Active' : 'Inactive'}</div>
+                    </div>
+                    <div className="p-6 space-y-4">
+                        {aqStatus && (
+                            <div className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                                <div><p className="text-sm text-gray-600 mb-1">Air Quality</p><p className={`text-2xl font-bold ${aqStatus.textColor}`}>{aqStatus.label}</p></div>
+                                <div className={`w-16 h-16 rounded-full ${aqStatus.color} flex items-center justify-center`}><Icon name="wind" className="w-8 h-8 text-white" /></div>
+                            </div>
+                        )}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="text-center p-3 bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg"><p className="text-xs text-gray-600 mb-1">Product</p><p className="font-mono text-sm font-semibold text-gray-900">{device.product?.code || 'N/A'}</p></div>
+                            <div className="text-center p-3 bg-gradient-to-br from-gray-50 to-gray-100 rounded-lg"><p className="text-xs text-gray-600 mb-1">Bound</p><p className="font-mono text-xs text-gray-900">{formatTimestamp(device.bound_at)}</p></div>
+                        </div>
+                        <div className="space-y-2">
+                            <button onClick={() => onMapToPug(device)} disabled={hasMappingExisting} className={`w-full py-3 px-4 rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 ${hasMappingExisting ? 'bg-gray-200 text-gray-500 cursor-not-allowed' : 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white hover:from-blue-700 hover:to-cyan-700 shadow-md hover:shadow-lg'}`}><Icon name="link" className="w-5 h-5" />{hasMappingExisting ? 'Already Mapped' : 'Map to Plug'}</button>
+                            <button onClick={() => onDownloadCSV(device)} className="w-full py-3 px-4 rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 bg-emerald-600 text-white hover:bg-emerald-700 shadow-md hover:shadow-lg"><Icon name="download" className="w-5 h-5" />Download CSV</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const MappingCard = ({ mapping, onToggle, onDelete }) => {
+            const [isDeleting, setIsDeleting] = useState(false);
+            useEffect(() => { lucide.createIcons(); }, []);
+            const handleDelete = async () => {
+                if (!window.confirm('Are you sure you want to delete this mapping?')) return;
+                setIsDeleting(true);
+                try { await onDelete(mapping.sensor_mac); } catch (e) { setIsDeleting(false); }
+            };
+            return (
+                <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-200 hover:shadow-xl transition-all duration-300">
+                    <div className="bg-gradient-to-br from-purple-500 to-pink-500 px-6 py-4">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3"><Icon name="link" className="w-6 h-6 text-white" /><div><h3 className="text-white font-semibold">Sensor-Plug Mapping</h3><p className="text-purple-100 text-sm font-mono">{mapping.sensor_mac}</p></div></div>
+                            <button onClick={() => onToggle(mapping)} className={`p-2 rounded-lg transition-all duration-200 ${mapping.enabled ? 'bg-green-400 hover:bg-green-500 text-green-900' : 'bg-gray-400 hover:bg-gray-500 text-gray-900'}`}><Icon name="power" className="w-5 h-5" /></button>
+                        </div>
+                    </div>
+                    <div className="p-6 space-y-4">
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"><span className="text-sm text-gray-600">Tuya Device</span><span className="font-mono text-sm font-medium text-gray-900">{mapping.tuya_device_id}</span></div>
+                            <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"><span className="text-sm text-gray-600">Status</span><span className={`px-3 py-1 rounded-full text-xs font-medium ${mapping.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'}`}>{mapping.enabled ? 'Automation Active' : 'Automation Paused'}</span></div>
+                            {mapping.updated_at && <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg"><span className="text-sm text-gray-600">Last Updated</span><span className="text-xs font-mono text-gray-900">{formatTimestamp(mapping.updated_at)}</span></div>}
+                        </div>
+                        <button onClick={handleDelete} disabled={isDeleting} className="w-full py-3 px-4 rounded-lg font-medium bg-red-500 text-white hover:bg-red-600 transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"><Icon name="trash-2" className="w-5 h-5" />{isDeleting ? 'Deleting…' : 'Delete Mapping'}</button>
+                    </div>
+                </div>
+            );
+        };
+
+        // ─────────────────────────────────────────────
+        // Dashboard  (receives onLogout prop)
+        // ─────────────────────────────────────────────
+        function AirQualityDashboard({ onLogout }) {
+            const [currentView, setCurrentView]     = useState('devices');
+            const userId                           = 'qingping_shared';
+            const [devices, setDevices]             = useState([]);
+            const [mappings, setMappings]           = useState([]);
+            const [tuyaDevices, setTuyaDevices]     = useState([]);
+            const [loading, setLoading]             = useState(false);
+            const [tuyaLoading, setTuyaLoading]     = useState(false);
+            const [error, setError]                 = useState(null);
+            const [success, setSuccess]             = useState(null);
+            const [mapForm, setMapForm]             = useState({ sensorMac:'', tuyaDeviceId:'', enabled:true });
+            const [showMapForm, setShowMapForm]     = useState(false);
+            const [csvForm, setCsvForm]             = useState({ sensorMac:'', sensorName:'', startDate:'', endDate:'' });
+            const [showCsvForm, setShowCsvForm]     = useState(false);
+            const [csvDownloading, setCsvDownloading] = useState(false);
+
+            useEffect(() => { lucide.createIcons(); }, [currentView, devices, mappings, showMapForm, showCsvForm, error, success]);
+            useEffect(() => {
+                if (currentView === 'devices') { loadDevices(); loadMappings(); }
+                else { loadMappings(); }
+            }, [currentView]);
+
+            const loadDevices  = async () => { setLoading(true); setError(null); try { const d = await api.listDevices(userId); setDevices(d.devices||[]); } catch(e){ setError(`Failed to load devices: ${e.message}`); } finally { setLoading(false); } };
+            const loadMappings = async () => { setLoading(true); setError(null); try { const d = await api.listMappings(userId); setMappings(d.mappings||[]); } catch(e){ setError(`Failed to load mappings: ${e.message}`); setMappings([]); } finally { setLoading(false); } };
+            const loadTuyaDevices = async () => { setTuyaLoading(true); setError(null); try { const d = await api.listTuyaDevices(); setTuyaDevices(d.devices||[]); } catch(e){ setError(`Failed to load Tuya devices: ${e.message}`); setTuyaDevices([]); } finally { setTuyaLoading(false); } };
+
+            const handleCreateMapping = async (e) => { e.preventDefault(); setLoading(true); setError(null); setSuccess(null); try { await api.createMapping(userId, mapForm.sensorMac, mapForm.tuyaDeviceId, mapForm.enabled); setSuccess('Mapping created successfully!'); setShowMapForm(false); setMapForm({sensorMac:'',tuyaDeviceId:'',enabled:true}); loadDevices(); loadMappings(); } catch(err){ setError(`Failed to create mapping: ${err.message}`); } finally { setLoading(false); } };
+            const handleToggleMapping = async (m) => { try { await api.toggleMapping(userId, m.sensor_mac, m.tuya_device_id, !m.enabled); setSuccess(`Mapping ${!m.enabled?'enabled':'disabled'} successfully!`); loadMappings(); } catch(e){ setError(`Failed to toggle mapping: ${e.message}`); } };
+            const handleDeleteMapping = async (mac) => { try { await api.deleteMapping(mac); setSuccess('Mapping deleted successfully!'); loadMappings(); } catch(e){ setError(`Failed to delete mapping: ${e.message}`); } };
+            const openMapForm  = (dev) => { setMapForm({sensorMac:dev.sensor_mac, tuyaDeviceId:'', enabled:true}); setShowMapForm(true); setError(null); setSuccess(null); loadTuyaDevices(); };
+            const openCsvForm  = (dev) => { const {start,end}=getDefaultDateRange(); setCsvForm({sensorMac:dev.sensor_mac, sensorName:dev.device_name||dev.product?.en_name||'Air Monitor', startDate:start, endDate:end}); setShowCsvForm(true); setError(null); setSuccess(null); };
+
+            const handleDownloadCSV = async (e) => {
+                e.preventDefault();
+                if (!csvForm.startDate || !csvForm.endDate) { setError('Please select both start and end dates'); return; }
+                if (csvForm.startDate > csvForm.endDate)   { setError('Start date must be before or equal to end date'); return; }
+                setCsvDownloading(true); setError(null); setSuccess(null);
+                try {
+                    const url = `${API_BASE_URL}/download/csv?sensor_mac=${encodeURIComponent(csvForm.sensorMac)}&start_time=${csvForm.startDate}&end_time=${csvForm.endDate}`;
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        const ct = response.headers.get('content-type');
+                        if (ct && ct.includes('application/json')) { const ed = await response.json(); throw new Error(ed.message || `Server error: ${response.status}`); }
+                        else { throw new Error((await response.text()) || `Server returned status ${response.status}`); }
+                    }
+                    const ct = response.headers.get('content-type');
+                    if (!ct || (!ct.includes('text/csv') && !ct.includes('application/csv'))) throw new Error('Server did not return a CSV file. Got: ' + ct);
+                    const blob = await response.blob();
+                    const blobUrl = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.style.display = 'none';
+                    a.href = blobUrl;
+                    a.download = `sensor_${csvForm.sensorMac}_${csvForm.startDate}_${csvForm.endDate}.csv`;
+                    document.body.appendChild(a);
+                    a.click();
+                    setTimeout(() => { window.URL.revokeObjectURL(blobUrl); document.body.removeChild(a); }, 100);
+                    setSuccess('CSV downloaded successfully!');
+                    setShowCsvForm(false);
+                    setTimeout(() => { window.location.reload(); }, 1000);
+                } catch (err) { console.error('CSV download error:', err); setError(`Failed to download CSV: ${err.message}`); }
+                finally { setCsvDownloading(false); }
+            };
+
+            const hasMappingForDevice = (mac) => mappings.some(m => m.sensor_mac === mac);
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
+
+                    {/* ── Header ── */}
+                    <header className="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-10">
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+                            <div className="flex items-center justify-between">
+                                {/* Left: logo + title */}
+                                <div className="flex items-center gap-4">
+                                    <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-cyan-600 rounded-xl flex items-center justify-center shadow-lg">
+                                        <Icon name="wind" className="w-7 h-7 text-white" />
+                                    </div>
+                                    <div>
+                                        <h1 className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">Air Quality Automation</h1>
+                                        <p className="text-sm text-gray-600 font-medium">Multi-Sensor Control System</p>
+                                    </div>
+                                </div>
+
+                                {/* Right: account badge + logout */}
+                                <div className="flex items-center gap-3">
+                                    <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-lg border border-blue-200">
+                                        <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                                        <span className="text-sm font-mono text-blue-900">qingping_shared</span>
+                                    </div>
+                                    <button
+                                        onClick={onLogout}
+                                        title="Sign out"
+                                        className="p-2 rounded-lg text-gray-500 hover:text-red-600 hover:bg-red-50 border border-gray-200 hover:border-red-200 transition-all duration-200"
+                                    >
+                                        <Icon name="log-out" className="w-5 h-5" />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* ── Nav ── */}
+                    <nav className="bg-white border-b border-gray-200 shadow-sm">
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                            <div className="flex gap-1">
+                                {[{id:'devices',label:'Devices',icon:'activity'},{id:'mappings',label:'Mappings',icon:'link'}].map(tab => (
+                                    <button key={tab.id} onClick={() => { setCurrentView(tab.id); setError(null); setSuccess(null); }}
+                                        className={`flex items-center gap-2 px-6 py-4 font-medium transition-all duration-200 border-b-2 ${currentView===tab.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'}`}>
+                                        <Icon name={tab.icon} className="w-5 h-5" />{tab.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </nav>
+
+                    {/* ── Main ── */}
+                    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                        {error   && <Alert type="error"  >{error}</Alert>}
+                        {success && <Alert type="success">{success}</Alert>}
+
+                        {/* Devices view */}
+                        {currentView === 'devices' && (
+                            <div className="space-y-6">
+                                <div className="flex items-center justify-between">
+                                    <h2 className="text-2xl font-bold text-gray-900">Your Devices</h2>
+                                    <button onClick={loadDevices} disabled={loading} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 disabled:opacity-50"><Icon name="refresh-cw" className={`w-4 h-4 ${loading?'animate-spin':''}`} />Refresh</button>
+                                </div>
+                                {loading ? <LoadingSpinner /> : devices.length === 0 ? (
+                                    <div className="text-center py-16 bg-white rounded-xl shadow-sm border border-gray-200">
+                                        <Icon name="activity" className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                                        <h3 className="text-xl font-semibold text-gray-900 mb-2">No Devices Found</h3>
+                                        <p className="text-gray-600">Make sure sensors are registered to the qingping_shared account.</p>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                        {devices.map(dev => <SensorCard key={dev.sensor_mac} device={dev} onMapToPug={openMapForm} onDownloadCSV={openCsvForm} hasMappingExisting={hasMappingForDevice(dev.sensor_mac)} />)}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Mappings view */}
+                        {currentView === 'mappings' && (
+                            <div className="space-y-6">
+                                <div className="flex items-center justify-between">
+                                    <h2 className="text-2xl font-bold text-gray-900">Sensor-Plug Mappings</h2>
+                                    <button onClick={loadMappings} disabled={loading} className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all duration-200 disabled:opacity-50"><Icon name="refresh-cw" className={`w-4 h-4 ${loading?'animate-spin':''}`} />Refresh</button>
+                                </div>
+                                {loading ? <LoadingSpinner /> : (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        {mappings.map(m => <MappingCard key={m.sensor_mac} mapping={m} onToggle={handleToggleMapping} onDelete={handleDeleteMapping} />)}
+                                    </div>
+                                )}
+                                {!loading && mappings.length === 0 && (
+                                    <div className="text-center py-16 bg-white rounded-xl shadow-sm border border-gray-200">
+                                        <Icon name="link" className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                                        <h3 className="text-xl font-semibold text-gray-900 mb-2">No Mappings Found</h3>
+                                        <p className="text-gray-600 mb-6">Create sensor-to-plug mappings from the Devices page</p>
+                                        <button onClick={() => setCurrentView('devices')} className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all duration-200">Go to Devices</button>
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        {/* Map-to-Plug modal */}
+                        {showMapForm && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                                <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                                    <div className="bg-gradient-to-br from-purple-600 to-pink-600 px-8 py-6"><h2 className="text-2xl font-bold text-white mb-2">Map Sensor to Plug</h2><p className="text-purple-100">Create automation mapping for air quality control</p></div>
+                                    <form onSubmit={handleCreateMapping} className="p-8 space-y-6">
+                                        <div><label className="block text-sm font-medium text-gray-700 mb-2">Sensor MAC Address</label><input type="text" value={mapForm.sensorMac} readOnly className="w-full px-4 py-3 border border-gray-300 rounded-lg bg-gray-50 font-mono text-gray-700" /></div>
+                                        <div>
+                                            <label className="block text-sm font-medium text-gray-700 mb-2">Tuya Device ID</label>
+                                            <select value={mapForm.tuyaDeviceId} onChange={e => setMapForm({...mapForm, tuyaDeviceId:e.target.value})} required disabled={tuyaLoading} className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent font-mono bg-white disabled:bg-gray-100">
+                                                <option value="">{tuyaLoading ? 'Loading…' : 'Select a Tuya plug'}</option>
+                                                {tuyaDevices.map(d => <option key={d.tuya_device_id} value={d.tuya_device_id}>{(d.name||d.tuya_device_id)+(d.online===false?' (offline)':'')}</option>)}
+                                            </select>
+                                            <p className="mt-2 text-sm text-gray-600">Select a registered plug.</p>
+                                        </div>
+                                        <div className="flex items-center gap-3 p-4 bg-blue-50 rounded-lg border border-blue-200"><input type="checkbox" id="enabledCb" checked={mapForm.enabled} onChange={e => setMapForm({...mapForm, enabled:e.target.checked})} className="w-5 h-5 text-purple-600 rounded focus:ring-purple-500" /><label htmlFor="enabledCb" className="text-sm font-medium text-gray-900">Enable automation immediately (plug on when PM2.5 ≥ 9)</label></div>
+                                        <div className="flex gap-3">
+                                            <button type="button" onClick={() => { setShowMapForm(false); setMapForm({sensorMac:'',tuyaDeviceId:'',enabled:true}); }} className="flex-1 py-3 px-6 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition-all duration-200">Cancel</button>
+                                            <button type="submit" disabled={loading} className="flex-1 py-3 px-6 bg-gradient-to-r from-purple-600 to-pink-600 text-white font-medium rounded-lg hover:from-purple-700 hover:to-pink-700 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl">{loading ? 'Creating…' : 'Create Mapping'}</button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* CSV Download modal */}
+                        {showCsvForm && (
+                            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                                <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full">
+                                    <div className="bg-gradient-to-br from-emerald-600 to-teal-600 px-8 py-6"><h2 className="text-2xl font-bold text-white mb-2">Download Sensor Data</h2><p className="text-emerald-100">Export historical readings to CSV</p></div>
+                                    <form onSubmit={handleDownloadCSV} className="p-8 space-y-6">
+                                        <div><label className="block text-sm font-medium text-gray-700 mb-2">Sensor</label><input type="text" value={`${csvForm.sensorName} (${csvForm.sensorMac})`} readOnly className="w-full px-4 py-3 border border-gray-300 rounded-lg bg-gray-50 text-gray-700" /></div>
+                                        <div className="grid grid-cols-2 gap-4">
+                                            <div><label className="block text-sm font-medium text-gray-700 mb-2">Start Date</label><input type="date" value={csvForm.startDate} onChange={e => setCsvForm({...csvForm, startDate:e.target.value})} required className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent" /></div>
+                                            <div><label className="block text-sm font-medium text-gray-700 mb-2">End Date</label><input type="date" value={csvForm.endDate} onChange={e => setCsvForm({...csvForm, endDate:e.target.value})} required className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-transparent" /></div>
+                                        </div>
+                                        <div className="bg-blue-50 border border-blue-200 rounded-lg p-4"><p className="text-sm text-gray-700"><strong>Note:</strong> CSV includes PM2.5, PM10, CO2, temperature, humidity, and battery for the selected range.</p></div>
+                                        <div className="flex gap-3">
+                                            <button type="button" onClick={() => { setShowCsvForm(false); setCsvForm({sensorMac:'',sensorName:'',startDate:'',endDate:''}); }} className="flex-1 py-3 px-6 bg-gray-200 text-gray-700 font-medium rounded-lg hover:bg-gray-300 transition-all duration-200">Cancel</button>
+                                            <button type="submit" disabled={csvDownloading} className="flex-1 py-3 px-6 bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-medium rounded-lg hover:from-emerald-700 hover:to-teal-700 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl flex items-center justify-center gap-2">
+                                                {csvDownloading ? (<><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>Downloading…</>) : (<><Icon name="download" className="w-5 h-5" />Download CSV</>)}
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* ── Footer ── */}
+                    <footer className="bg-white border-t border-gray-200 mt-16">
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+                            <div className="flex items-center justify-between text-sm text-gray-600">
+                                <p>Air Quality Automation System v1.0</p>
+                                <div className="flex items-center gap-2"><div className="w-2 h-2 bg-green-500 rounded-full"></div><span>Backend Connected</span></div>
+                            </div>
+                        </div>
+                    </footer>
+                </div>
+            );
+        }
+
+        // ─────────────────────────────────────────────
+        // Error Boundary  —  catches any render/effect error
+        // inside Dashboard so the screen never goes blank.
+        // ─────────────────────────────────────────────
+        class ErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = { error: null };
+            }
+            static getDerivedStateFromError(error) {
+                return { error };
+            }
+            componentDidCatch(error, info) {
+                console.error('Dashboard error:', error, info);
+            }
+            render() {
+                if (this.state.error) {
+                    return (
+                        <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50 flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl shadow-xl border border-red-200 max-w-md w-full overflow-hidden">
+                                <div className="bg-gradient-to-br from-red-500 to-pink-500 px-8 py-6 text-center">
+                                    <h2 className="text-xl font-bold text-white">Something went wrong</h2>
+                                    <p className="text-red-100 text-sm mt-1">The dashboard failed to load</p>
+                                </div>
+                                <div className="p-8 space-y-4 text-center">
+                                    <p className="text-sm text-gray-600 font-mono break-all">{this.state.error.message}</p>
+                                    <button
+                                        onClick={() => window.location.reload()}
+                                        className="px-6 py-3 bg-gradient-to-r from-blue-600 to-cyan-600 text-white font-medium rounded-lg hover:from-blue-700 hover:to-cyan-700 transition-all duration-200 shadow-md"
+                                    >Reload page</button>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
+
+        // ─────────────────────────────────────────────
+        // App  —  auth gate: login ↔ dashboard
+        // ─────────────────────────────────────────────
+        function App() {
+            // null = check in progress on first mount, string = authenticated, false = not authenticated
+            const [accessToken, setAccessToken] = useState(() => getToken() || false);
+
+            // Wire the interceptor's 401 callback to this component's state
+            useEffect(() => {
+                _onUnauthorized = () => setAccessToken(false);
+                return () => { _onUnauthorized = null; };
+            }, []);
+
+            const handleLoginSuccess = useCallback(() => {
+                // Token already stored in sessionStorage by cognitoLogin handler;
+                // just flip state so we render the dashboard.
+                setAccessToken(getToken());
+            }, []);
+
+            const handleLogout = useCallback(() => {
+                clearToken();
+                setAccessToken(false);
+            }, []);
+
+            if (!accessToken) {
+                return <LoginPage onLoginSuccess={handleLoginSuccess} />;
+            }
+
+            return <ErrorBoundary><AirQualityDashboard onLogout={handleLogout} /></ErrorBoundary>;
+        }
+
+        ReactDOM.render(<App />, document.getElementById('root'));
+    </script>
+</body>
+</html>
