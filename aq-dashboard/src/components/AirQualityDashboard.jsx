@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
 import {
   Wind, Activity, Link as LinkIcon, RefreshCw,
-  Download, LogOut, AlertCircle, CheckCircle,
+  Download, LogOut, AlertCircle, CheckCircle, Power,
 } from 'lucide-react'
 
 import { api, getDefaultDateRange } from '../api/api.js'
 import { API_BASE_URL }             from '../api/fetchInterceptor.js'
 import SensorCard                   from './SensorCard.jsx'
 import MappingCard                  from './MappingCard.jsx'
+import SmartPlugCard                from './SmartPlugCard.jsx'
 
 function Alert({ type = 'info', children }) {
   const styles = {
@@ -54,7 +55,8 @@ export default function AirQualityDashboard({ onLogout }) {
   // ── data loaders ──────────────────────────────────────────
   useEffect(() => {
     if (currentView === 'devices') { loadDevices(); loadMappings() }
-    else                            { loadMappings() }
+    else if (currentView === 'smart-plugs') { loadTuyaDevices(); loadMappings() }
+    else                                   { loadMappings() }
   }, [currentView]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadDevices = async () => {
@@ -181,6 +183,7 @@ export default function AirQualityDashboard({ onLogout }) {
   }
 
   const hasMappingForDevice = (mac) => mappings.some((m) => m.sensor_mac === mac)
+  const onlinePlugCount = tuyaDevices.filter((plug) => plug.online !== false && plug.is_online !== false).length
 
   //  render
   return (
@@ -228,6 +231,7 @@ export default function AirQualityDashboard({ onLogout }) {
           <div className="flex gap-1">
             {[
               { id: 'devices',  label: 'Devices',  Icon: Activity },
+              { id: 'smart-plugs', label: 'Smart Plugs', Icon: Power },
               { id: 'mappings', label: 'Mappings', Icon: LinkIcon },
             ].map((tab) => (
               <button
@@ -284,6 +288,64 @@ export default function AirQualityDashboard({ onLogout }) {
                     onMapToPug={openMapForm}
                     onDownloadCSV={openCsvForm}
                     hasMappingExisting={hasMappingForDevice(dev.sensor_mac)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/*  Smart plugs view  */}
+        {currentView === 'smart-plugs' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Smart Plugs</h2>
+                <p className="text-sm text-gray-600 mt-1">
+                  Review Tuya plug availability and the sensors mapped to each plug.
+                </p>
+              </div>
+
+              <button
+                onClick={loadTuyaDevices}
+                disabled={tuyaLoading}
+                className="flex items-center gap-2 px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-all duration-200 disabled:opacity-50"
+              >
+                <RefreshCw className={`w-4 h-4 ${tuyaLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                <p className="text-sm text-gray-600 mb-1">Registered Plugs</p>
+                <p className="text-3xl font-bold text-gray-900">{tuyaDevices.length}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                <p className="text-sm text-gray-600 mb-1">Online Right Now</p>
+                <p className="text-3xl font-bold text-emerald-600">{onlinePlugCount}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+                <p className="text-sm text-gray-600 mb-1">Mapped Sensors</p>
+                <p className="text-3xl font-bold text-amber-600">{mappings.length}</p>
+              </div>
+            </div>
+
+            {tuyaLoading ? (
+              <LoadingSpinner />
+            ) : tuyaDevices.length === 0 ? (
+              <div className="text-center py-16 bg-white rounded-xl shadow-sm border border-gray-200">
+                <Power className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                <h3 className="text-xl font-semibold text-gray-900 mb-2">No Smart Plugs Found</h3>
+                <p className="text-gray-600">Make sure your Tuya devices are available through the backend.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                {tuyaDevices.map((plug) => (
+                  <SmartPlugCard
+                    key={plug.tuya_device_id || plug.device_id || plug.id}
+                    plug={plug}
+                    mappings={mappings}
                   />
                 ))}
               </div>
