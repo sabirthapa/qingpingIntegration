@@ -1,8 +1,26 @@
-import { Activity, Wind, Link as LinkIcon, Download } from 'lucide-react'
-import { formatTimestamp, getAirQualityStatus } from '../api/api.js'
+import {
+  Activity,
+  Wind,
+  Link as LinkIcon,
+  Download,
+  Wifi,
+  WifiOff,
+} from 'lucide-react'
+
+import {
+  formatTimestamp,
+  getAirQualityStatus,
+  getRelativeTime,
+  getSensorConnectionStatus,
+} from '../api/api.js'
 
 export default function SensorCard({ device, onMapToPug, onDownloadCSV, hasMappingExisting }) {
-  const aqStatus = device.latest_pm25 ? getAirQualityStatus(device.latest_pm25) : null
+  const aqStatus =
+    device.latest_pm25 != null
+      ? getAirQualityStatus(device.latest_pm25)
+      : null
+
+  const connection = getSensorConnectionStatus(device)
 
   return (
     <div className="bg-white rounded-xl shadow-lg overflow-hidden border border-gray-200 hover:shadow-xl transition-all duration-300 hover:-translate-y-1">
@@ -19,11 +37,30 @@ export default function SensorCard({ device, onMapToPug, onDownloadCSV, hasMappi
           </div>
         </div>
         <div
-          className={`px-3 py-1 rounded-full text-xs font-medium ${
-            device.enabled ? 'bg-green-400 text-green-900' : 'bg-gray-400 text-gray-900'
+          title={
+            connection.lastSeenAt
+              ? `Last seen: ${formatTimestamp(connection.lastSeenAt)}`
+              : 'No recent reading received'
+          }
+          className={`px-3 py-1 rounded-full text-xs font-medium flex items-center gap-1.5 ${
+            connection.known
+              ? connection.online
+                ? 'bg-green-400 text-green-900'
+                : 'bg-red-200 text-red-900'
+              : 'bg-gray-300 text-gray-800'
           }`}
         >
-          {device.enabled ? 'Active' : 'Inactive'}
+          {connection.online ? (
+            <Wifi className="w-3.5 h-3.5" />
+          ) : (
+            <WifiOff className="w-3.5 h-3.5" />
+          )}
+
+          {connection.known
+            ? connection.online
+              ? 'Online'
+              : 'Offline'
+            : 'Unknown'}
         </div>
       </div>
 
@@ -42,6 +79,46 @@ export default function SensorCard({ device, onMapToPug, onDownloadCSV, hasMappi
             </div>
           </div>
         )}
+
+        {/* connection details */}
+        <div
+          className={`p-3 rounded-lg border ${
+            connection.known
+              ? connection.online
+                ? 'bg-green-50 border-green-200'
+                : 'bg-red-50 border-red-200'
+              : 'bg-gray-50 border-gray-200'
+          }`}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-sm font-medium text-gray-700">
+              Sensor connection
+            </span>
+
+            <span
+              className={`text-sm font-semibold ${
+                connection.known
+                  ? connection.online
+                    ? 'text-green-700'
+                    : 'text-red-700'
+                  : 'text-gray-600'
+              }`}
+            >
+              {connection.known
+                ? connection.online
+                  ? 'Online'
+                  : 'Offline'
+                : 'Unknown'}
+            </span>
+          </div>
+
+          <p className="mt-1 text-xs text-gray-600">
+            Last reading:{' '}
+            {connection.lastSeenAt
+              ? getRelativeTime(connection.lastSeenAt)
+              : 'not available'}
+          </p>
+        </div>
 
         {/* meta row */}
         <div className="grid grid-cols-2 gap-3">

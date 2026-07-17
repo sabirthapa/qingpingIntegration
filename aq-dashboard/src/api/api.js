@@ -55,6 +55,69 @@ export const api = {
 
 // ─── Utility helpers ──────────────────────────────────────────
 
+export function normalizeEpochSeconds(value) {
+  if (value == null || value === '') return null
+
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+
+  return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+}
+
+export function getRelativeTime(ts) {
+  const seconds = normalizeEpochSeconds(ts)
+  if (!seconds) return 'Never'
+
+  const diff = Math.max(
+    0,
+    Math.floor(Date.now() / 1000) - seconds
+  )
+
+  if (diff < 60) return 'Just now'
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} hr ago`
+
+  const days = Math.floor(diff / 86400)
+  return `${days} day${days === 1 ? '' : 's'} ago`
+}
+
+export function getSensorConnectionStatus(
+  device,
+  thresholdSeconds = 300
+) {
+  if (typeof device?.online === 'boolean') {
+    return {
+      online: device.online,
+      known: true,
+      lastSeenAt: normalizeEpochSeconds(device.last_seen_at),
+    }
+  }
+
+  const lastSeenAt = normalizeEpochSeconds(
+    device?.last_seen_at ??
+    device?.last_observed_at ??
+    device?.received_at ??
+    device?.latest_timestamp
+  )
+
+  if (!lastSeenAt) {
+    return {
+      online: false,
+      known: false,
+      lastSeenAt: null,
+    }
+  }
+
+  const ageSeconds =
+    Math.floor(Date.now() / 1000) - lastSeenAt
+
+  return {
+    online: ageSeconds <= thresholdSeconds,
+    known: true,
+    lastSeenAt,
+  }
+}
+
 export function formatTimestamp(ts) {
   return ts ? new Date(ts * 1000).toLocaleString() : 'N/A'
 }

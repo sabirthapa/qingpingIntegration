@@ -359,11 +359,19 @@ export default function AirQualityDashboard({ onLogout }) {
             <div className="flex items-center justify-between">
               <h2 className="text-2xl font-bold text-gray-900">Sensor-Plug Mappings</h2>
               <button
-                onClick={loadMappings}
-                disabled={loading}
+                onClick={() => {
+                  loadDevices()
+                  loadMappings()
+                  loadTuyaDevices()
+                }}
+                disabled={loading || tuyaLoading}
                 className="flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-all duration-200 disabled:opacity-50"
               >
-                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                <RefreshCw
+                  className={`w-4 h-4 ${
+                    loading || tuyaLoading ? 'animate-spin' : ''
+                  }`}
+                />
                 Refresh
               </button>
             </div>
@@ -376,6 +384,13 @@ export default function AirQualityDashboard({ onLogout }) {
                   <MappingCard
                     key={m.sensor_mac}
                     mapping={m}
+                    sensor={devices.find(
+                      (device) => device.sensor_mac === m.sensor_mac
+                    )}
+                    tuyaDevice={tuyaDevices.find(
+                      (device) =>
+                        device.tuya_device_id === m.tuya_device_id
+                    )}
                     onToggle={handleToggleMapping}
                     onDelete={handleDeleteMapping}
                   />
