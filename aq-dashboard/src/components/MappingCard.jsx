@@ -1,9 +1,39 @@
 import { useState } from 'react'
-import { Link as LinkIcon, Power, Trash2 } from 'lucide-react'
-import { formatTimestamp } from '../api/api.js'
+import {
+  Link as LinkIcon,
+  Power,
+  Trash2,
+  Wifi,
+  WifiOff,
+} from 'lucide-react'
 
-export default function MappingCard({ mapping, onToggle, onDelete }) {
+import {
+  formatTimestamp,
+  getRelativeTime,
+  getSensorConnectionStatus,
+} from '../api/api.js'
+
+export default function MappingCard({
+  mapping,
+  sensor,
+  tuyaDevice,
+  onToggle,
+  onDelete,
+}) {
   const [isDeleting, setIsDeleting] = useState(false)
+
+  const sensorConnection =
+    getSensorConnectionStatus(sensor || mapping)
+
+  const plugOnline =
+    typeof tuyaDevice?.online === 'boolean'
+      ? tuyaDevice.online
+      : null
+
+  const plugState =
+    tuyaDevice?.switch_state ??
+    tuyaDevice?.switchState ??
+    tuyaDevice?.state
 
   const handleDelete = async () => {
     if (!window.confirm('Are you sure you want to delete this mapping?')) return
@@ -51,8 +81,102 @@ export default function MappingCard({ mapping, onToggle, onDelete }) {
             <span className="font-mono text-sm font-medium text-gray-900">{mapping.tuya_device_id}</span>
           </div>
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Sensor status */}
+            <div
+              className={`p-3 rounded-lg border ${
+                sensorConnection.known
+                  ? sensorConnection.online
+                    ? 'bg-green-50 border-green-200'
+                    : 'bg-red-50 border-red-200'
+                  : 'bg-gray-50 border-gray-200'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm text-gray-600">
+                  Sensor
+                </span>
+
+                <span
+                  className={`flex items-center gap-1 text-xs font-semibold ${
+                    sensorConnection.known
+                      ? sensorConnection.online
+                        ? 'text-green-700'
+                        : 'text-red-700'
+                      : 'text-gray-600'
+                  }`}
+                >
+                  {sensorConnection.online ? (
+                    <Wifi className="w-4 h-4" />
+                  ) : (
+                    <WifiOff className="w-4 h-4" />
+                  )}
+
+                  {sensorConnection.known
+                    ? sensorConnection.online
+                      ? 'Online'
+                      : 'Offline'
+                    : 'Unknown'}
+                </span>
+              </div>
+
+              <p className="mt-1 text-xs text-gray-500">
+                {sensorConnection.lastSeenAt
+                  ? `Last reading ${getRelativeTime(
+                      sensorConnection.lastSeenAt
+                    )}`
+                  : 'No last-reading time'}
+              </p>
+            </div>
+
+            {/* Smart plug status */}
+            <div
+              className={`p-3 rounded-lg border ${
+                plugOnline === true
+                  ? 'bg-green-50 border-green-200'
+                  : plugOnline === false
+                    ? 'bg-red-50 border-red-200'
+                    : 'bg-gray-50 border-gray-200'
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm text-gray-600">
+                  Smart plug
+                </span>
+
+                <span
+                  className={`flex items-center gap-1 text-xs font-semibold ${
+                    plugOnline === true
+                      ? 'text-green-700'
+                      : plugOnline === false
+                        ? 'text-red-700'
+                        : 'text-gray-600'
+                  }`}
+                >
+                  {plugOnline === true ? (
+                    <Wifi className="w-4 h-4" />
+                  ) : (
+                    <WifiOff className="w-4 h-4" />
+                  )}
+
+                  {plugOnline === true
+                    ? 'Online'
+                    : plugOnline === false
+                      ? 'Offline'
+                      : 'Unknown'}
+                </span>
+              </div>
+
+              <p className="mt-1 text-xs text-gray-500">
+                {plugState == null
+                  ? tuyaDevice?.name || 'Status from Tuya'
+                  : `Switch ${plugState ? 'ON' : 'OFF'}`}
+              </p>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-            <span className="text-sm text-gray-600">Status</span>
+            <span className="text-sm text-gray-600">Automation</span>
             <span
               className={`px-3 py-1 rounded-full text-xs font-medium ${
                 mapping.enabled ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'
