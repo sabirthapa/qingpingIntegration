@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import JSZip from 'jszip'
 import {
   Wind, Activity, Link as LinkIcon, RefreshCw,
   Download, LogOut, AlertCircle, CheckCircle, Power,
@@ -9,6 +10,40 @@ import { API_BASE_URL }             from '../api/fetchInterceptor.js'
 import SensorCard                   from './SensorCard.jsx'
 import MappingCard                  from './MappingCard.jsx'
 import SmartPlugCard                from './SmartPlugCard.jsx'
+
+function sanitizeFilenamePart(value, fallback) {
+  const cleaned = String(value || fallback)
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80)
+
+  return cleaned || fallback
+}
+
+function getSensorName(device) {
+  return device?.device_name || device?.product?.en_name || 'Air Monitor'
+}
+
+function getSensorCsvFilename(sensorMac, sensorName) {
+  const safeMac = sanitizeFilenamePart(sensorMac, 'Unknown')
+  const safeName = sanitizeFilenamePart(sensorName, 'Air_Monitor')
+  return `sensor_${safeMac}_${safeName}.csv`
+}
+
+function downloadBlob(blob, filename) {
+  const blobUrl = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.style.display = 'none'
+  a.href = blobUrl
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  setTimeout(() => {
+    window.URL.revokeObjectURL(blobUrl)
+    document.body.removeChild(a)
+  }, 1000)
+}
 
 function Alert({ type = 'info', children }) {
   const styles = {
@@ -51,6 +86,7 @@ export default function AirQualityDashboard({ onLogout }) {
   const [csvForm,        setCsvForm]        = useState({ sensorMac: '', sensorName: '', startDate: '', endDate: '' })
   const [showCsvForm,    setShowCsvForm]    = useState(false)
   const [csvDownloading, setCsvDownloading] = useState(false)
+  const [csvProgress,    setCsvProgress]    = useState(null)
 
   // ── data loaders ──────────────────────────────────────────
   useEffect(() => {
@@ -131,6 +167,46 @@ export default function AirQualityDashboard({ onLogout }) {
     setError(null); setSuccess(null)
   }
 
+  const openAllCsvForm = () => {
+    const { start, end } = getDefaultDateRange()
+    setCsvForm({
+      sensorMac:  '',
+      sensorName: 'All sensors',
+      startDate:  start,
+      endDate:    end,
+    })
+    setShowCsvForm(true)
+    setError(null); setSuccess(null)
+  }
+
+  const fetchSensorCsv = async (sensorMac, startDate, endDate) => {
+    const url = (
+      `${API_BASE_URL}/download/csv` +
+      `?sensor_mac=${encodeURIComponent(sensorMac)}` +
+      `&start_time=${startDate}` +
+      `&end_time=${endDate}`
+    )
+    const response = await fetch(url)
+
+    if (!response.ok) {
+      const ct = response.headers.get('content-type')
+      if (ct && ct.includes('application/json')) {
+        const details = await response.json()
+        const error = new Error(details.message || `Server error: ${response.status}`)
+        error.status = response.status
+        throw error
+      }
+      throw new Error((await response.text()) || `Server returned status ${response.status}`)
+    }
+
+    const ct = response.headers.get('content-type')
+    if (!ct || (!ct.includes('text/csv') && !ct.includes('application/csv'))) {
+      throw new Error('Server did not return a CSV file. Got: ' + ct)
+    }
+
+    return response.blob()
+  }
+
   // CSV download
   const handleDownloadCSV = async (e) => {
     e.preventDefault()
@@ -140,45 +216,69 @@ export default function AirQualityDashboard({ onLogout }) {
     setCsvDownloading(true); setError(null); setSuccess(null)
 
     try {
-      const url = (
-        `${API_BASE_URL}/download/csv` +
-        `?sensor_mac=${encodeURIComponent(csvForm.sensorMac)}` +
-        `&start_time=${csvForm.startDate}` +
-        `&end_time=${csvForm.endDate}`
-      )
-      const response = await fetch(url)
+      if (csvForm.sensorMac) {
+        const blob = await fetchSensorCsv(
+          csvForm.sensorMac,
+          csvForm.startDate,
+          csvForm.endDate
+        )
+        downloadBlob(
+          blob,
+          getSensorCsvFilename(csvForm.sensorMac, csvForm.sensorName)
+        )
+        setSuccess('CSV downloaded successfully!')
+      } else {
+        const zip = new JSZip()
+        let downloaded = 0
+        let skipped = 0
 
-      if (!response.ok) {
-        const ct = response.headers.get('content-type')
-        if (ct && ct.includes('application/json')) {
-          const ed = await response.json()
-          throw new Error(ed.message || `Server error: ${response.status}`)
+        setCsvProgress({ completed: 0, total: devices.length })
+
+        for (const device of devices) {
+          try {
+            const blob = await fetchSensorCsv(
+              device.sensor_mac,
+              csvForm.startDate,
+              csvForm.endDate
+            )
+            zip.file(
+              getSensorCsvFilename(device.sensor_mac, getSensorName(device)),
+              blob
+            )
+            downloaded += 1
+          } catch (err) {
+            if (err.status === 404) skipped += 1
+            else throw new Error(`${device.sensor_mac}: ${err.message}`)
+          } finally {
+            setCsvProgress((progress) => ({
+              completed: (progress?.completed || 0) + 1,
+              total: devices.length,
+            }))
+          }
         }
-        throw new Error((await response.text()) || `Server returned status ${response.status}`)
+
+        if (downloaded === 0) {
+          throw new Error('No sensor data was found for the selected date range')
+        }
+
+        const zipBlob = await zip.generateAsync({ type: 'blob' })
+        downloadBlob(
+          zipBlob,
+          `all_sensor_data_${csvForm.startDate}_to_${csvForm.endDate}.zip`
+        )
+        setSuccess(
+          `Downloaded ${downloaded} sensor CSV${downloaded === 1 ? '' : 's'}` +
+          (skipped ? `; ${skipped} had no data in this range.` : '.')
+        )
       }
 
-      const ct = response.headers.get('content-type')
-      if (!ct || (!ct.includes('text/csv') && !ct.includes('application/csv'))) {
-        throw new Error('Server did not return a CSV file. Got: ' + ct)
-      }
-
-      const blob    = await response.blob()
-      const blobUrl = window.URL.createObjectURL(blob)
-      const a       = document.createElement('a')
-      a.style.display = 'none'
-      a.href          = blobUrl
-      a.download      = `sensor_${csvForm.sensorMac}_${csvForm.startDate}_${csvForm.endDate}.csv`
-      document.body.appendChild(a)
-      a.click()
-      setTimeout(() => { window.URL.revokeObjectURL(blobUrl); document.body.removeChild(a) }, 100)
-
-      setSuccess('CSV downloaded successfully!')
       setShowCsvForm(false)
     } catch (err) {
       console.error('CSV download error:', err)
       setError(`Failed to download CSV: ${err.message}`)
     } finally {
       setCsvDownloading(false)
+      setCsvProgress(null)
     }
   }
 
@@ -259,16 +359,26 @@ export default function AirQualityDashboard({ onLogout }) {
         {/*  Devices view  */}
         {currentView === 'devices' && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <h2 className="text-2xl font-bold text-gray-900">Your Devices</h2>
-              <button
-                onClick={loadDevices}
-                disabled={loading}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 disabled:opacity-50"
-              >
-                <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                Refresh
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={openAllCsvForm}
+                  disabled={loading || devices.length === 0}
+                  className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-all duration-200 disabled:opacity-50"
+                >
+                  <Download className="w-4 h-4" />
+                  Download All Data
+                </button>
+                <button
+                  onClick={loadDevices}
+                  disabled={loading}
+                  className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+              </div>
             </div>
 
             {loading ? (
@@ -496,17 +606,29 @@ export default function AirQualityDashboard({ onLogout }) {
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
             <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full">
               <div className="bg-gradient-to-br from-emerald-600 to-teal-600 px-8 py-6">
-                <h2 className="text-2xl font-bold text-white mb-2">Download Sensor Data</h2>
-                <p className="text-emerald-100">Export historical readings to CSV</p>
+                <h2 className="text-2xl font-bold text-white mb-2">
+                  {csvForm.sensorMac ? 'Download Sensor Data' : 'Download All Sensor Data'}
+                </h2>
+                <p className="text-emerald-100">
+                  {csvForm.sensorMac
+                    ? 'Export historical readings to CSV'
+                    : 'Export one CSV per sensor in a ZIP file'}
+                </p>
               </div>
 
               <form onSubmit={handleDownloadCSV} className="p-8 space-y-6">
                 {/* sensor label (read-only) */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Sensor</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    {csvForm.sensorMac ? 'Sensor' : 'Sensors'}
+                  </label>
                   <input
                     type="text"
-                    value={`${csvForm.sensorName} (${csvForm.sensorMac})`}
+                    value={
+                      csvForm.sensorMac
+                        ? `${csvForm.sensorName} (${csvForm.sensorMac})`
+                        : `All registered sensors (${devices.length})`
+                    }
                     readOnly
                     className="w-full px-4 py-3 border border-gray-300 rounded-lg bg-gray-50 text-gray-700"
                   />
@@ -539,7 +661,10 @@ export default function AirQualityDashboard({ onLogout }) {
                 {/* note */}
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                   <p className="text-sm text-gray-700">
-                    <strong>Note:</strong> CSV includes PM2.5, PM10, CO2, temperature, humidity, and battery for the selected range.
+                    <strong>Note:</strong>{' '}
+                    {csvForm.sensorMac
+                      ? 'CSV includes PM2.5, PM10, CO2, temperature, humidity, and battery for the selected range.'
+                      : 'The ZIP contains one CSV per sensor. Sensors without data in this range will be skipped.'}
                   </p>
                 </div>
 
@@ -560,12 +685,14 @@ export default function AirQualityDashboard({ onLogout }) {
                     {csvDownloading ? (
                       <>
                         <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                        Downloading…
+                        {csvProgress
+                          ? `Downloading ${csvProgress.completed}/${csvProgress.total}…`
+                          : 'Downloading…'}
                       </>
                     ) : (
                       <>
                         <Download className="w-5 h-5" />
-                        Download CSV
+                        {csvForm.sensorMac ? 'Download CSV' : 'Download ZIP'}
                       </>
                     )}
                   </button>
