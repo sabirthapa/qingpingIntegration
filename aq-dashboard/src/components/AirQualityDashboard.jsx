@@ -200,6 +200,21 @@ export default function AirQualityDashboard({ onLogout }) {
     }
 
     const ct = response.headers.get('content-type')
+
+    if (ct && ct.includes('application/json')) {
+      const details = await response.json()
+      if (!details.download_url) {
+        throw new Error(details.message || 'Server did not provide a download link')
+      }
+
+      const fileResponse = await fetch(details.download_url)
+      if (!fileResponse.ok) {
+        throw new Error(`Unable to retrieve exported CSV: ${fileResponse.status}`)
+      }
+
+      return fileResponse.blob()
+    }
+
     if (!ct || (!ct.includes('text/csv') && !ct.includes('application/csv'))) {
       throw new Error('Server did not return a CSV file. Got: ' + ct)
     }
